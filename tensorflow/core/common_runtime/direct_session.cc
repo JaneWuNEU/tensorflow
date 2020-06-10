@@ -85,14 +85,24 @@ auto* direct_session_runs = monitoring::Counter<0>::New(
     "/tensorflow/core/direct_session_runs",
     "The number of times DirectSession::Run() has been called.");
 
+ # 根据sessionoption和ThreadPoolOptionProto创建线程池,具体步骤
+    1.确定线程池的大小num_threads.
+      若thread_pool_options.num_threads为0,将num_threads设置为inter值.
+    2.确定创建Session-local threadpool还是Session-global threadpool.
+      如果thread_pool_options.global_name为空,创建size为num_threads的局部session线程池并返回.
+      反之,创建size为num_threads的全局线程池.
+        
 Status NewThreadPoolFromThreadPoolOptions(
     const SessionOptions& options,
     const ThreadPoolOptionProto& thread_pool_options, int pool_number,
-    thread::ThreadPool** pool, bool* owned) {
-  int32 num_threads = thread_pool_options.num_threads();
+    thread::ThreadPool** pool, bool* owned)
+    # 同时传入session和threadpool的配置信息
+  {
+  int32 num_threads = thread_pool_options.num_threads(); 
   if (num_threads == 0) {
     num_threads = NumInterOpThreadsFromSessionOptions(options);
-  }
+  } #确定线程池大小
+        
   const string& name = thread_pool_options.global_name();
   if (name.empty()) {
     // Session-local threadpool.
@@ -104,7 +114,7 @@ Status NewThreadPoolFromThreadPoolOptions(
         /*allocator=*/nullptr);
     *owned = true;
     return Status::OK();
-  }
+  } #创建Session-local threadpool并返回
 
   // Global, named threadpool.
   typedef std::pair<int32, thread::ThreadPool*> MapValue;
@@ -126,7 +136,7 @@ Status NewThreadPoolFromThreadPoolOptions(
           " configured previously with num_threads=", mvalue->first,
           "; cannot re-configure with num_threads=",
           thread_pool_options.num_threads());
-    }
+    }#num_threads的线程池已经存在
   }
   *owned = false;
   *pool = mvalue->second;
@@ -142,6 +152,7 @@ thread::ThreadPool* GlobalThreadPool(const SessionOptions& options) {
 // TODO(vrv): Figure out how to unify the many different functions
 // that generate RendezvousKey, since many of them have to be
 // consistent with each other.
+# 生成tensor的唯一标识码
 string GetRendezvousKey(const string& tensor_name,
                         const DeviceAttributes& device_info,
                         const FrameAndIter& frame_iter) {
@@ -186,10 +197,12 @@ class DirectSessionFactory : public SessionFactory {
     }
     std::vector<std::unique_ptr<Device>> devices;
     TF_RETURN_IF_ERROR(DeviceFactory::AddDevices(
-        options, "/job:localhost/replica:0/task:0", &devices));
+        options, "/job:localhost/replica:0/task:0", &devices)); 
+     #根据sessionoptions创建device
 
     DirectSession* session = new DirectSession(
         options, new StaticDeviceMgr(std::move(devices)), this);
+    #创建DirectSession实例
     {
       mutex_lock l(sessions_lock_);
       sessions_.push_back(session);
@@ -251,7 +264,15 @@ static DirectSessionRegistrar registrar;
 std::atomic_int_fast64_t DirectSession::step_id_counter_(1);
 
 static RunHandlerPool* GetOrCreateRunHandlerPool(
-    const SessionOptions& options) {
+    const SessionOptions& options) 
+#确定inter_thread和intra_threads
+    1. 读取系统是否存在intra和inter非0的环境变量.如果均不为0,创建相应大小的inter和intra pool
+    2. 若1中的inter仍为0
+       a.读取options.config.session_inter_op_thread_pool(0).num_threads, 如不为0,该num_thread为inter的最终结果
+       b.若a中的num_thread为0,读取NumInterOpThreadsFromSessionOptions(session options)中的inter,并将其是设置为inter的最终结果.
+    3. 若1中的intra仍为0
+       令num_intra_threads = options.config.intra_op_parallelism_threads();
+{
   int num_inter_threads = 0;
   int num_intra_threads = 0;
   static const int env_num_inter_threads = NumInterOpThreadsFromEnvironment();
@@ -273,7 +294,7 @@ static RunHandlerPool* GetOrCreateRunHandlerPool(
     if (num_inter_threads == 0) {
       num_inter_threads = NumInterOpThreadsFromSessionOptions(options);
     }
-  }
+  } 
 
   if (num_intra_threads == 0) {
     num_intra_threads = options.config.intra_op_parallelism_threads();
@@ -288,6 +309,10 @@ static RunHandlerPool* GetOrCreateRunHandlerPool(
 }
 
 bool DirectSession::ShouldUseRunHandlerPool(
+    # 判断是否使用RunHandlerPool,以下情况不使用RunHandlerPool
+    1.use_per_session_threads为True
+    2.同时配置了threadpooloptions(session_inter_op_thread_pool_size>0,也就是线程池的个数)和runoption(run_options.inter_op_thread_pool > 0)
+      
     const RunOptions& run_options) const {
   if (options_.config.use_per_session_threads()) return false;
   if (options_.config.session_inter_op_thread_pool_size() > 0 &&
@@ -312,7 +337,7 @@ DirectSession::DirectSession(const SessionOptions& options,
       cancellation_manager_(new CancellationManager()),
       operation_timeout_in_ms_(options_.config.operation_timeout_in_ms()) {
   const int thread_pool_size =
-      options_.config.session_inter_op_thread_pool_size();
+      options_.config.session_inter_op_thread_pool_size();#生成几个线程池
   if (thread_pool_size > 0) {
     for (int i = 0; i < thread_pool_size; ++i) {
       thread::ThreadPool* pool = nullptr;
@@ -326,15 +351,15 @@ DirectSession::DirectSession(const SessionOptions& options,
     thread_pools_.emplace_back(NewThreadPoolFromSessionOptions(options_),
                                true /* owned */);
   } else {
-    thread_pools_.emplace_back(GlobalThreadPool(options), false /* owned */);
+    thread_pools_.emplace_back(GlobalThreadPool(options), false /* owned */);#创建全局线程池,并插入
     // Run locally if environment value of TF_NUM_INTEROP_THREADS is negative
     // and config.inter_op_parallelism_threads is unspecified or negative.
     static const int env_num_threads = NumInterOpThreadsFromEnvironment();
     if (options_.config.inter_op_parallelism_threads() < 0 ||
         (options_.config.inter_op_parallelism_threads() == 0 &&
          env_num_threads < 0)) {
-      run_in_caller_thread_ = true;
-    }
+      run_in_caller_thread_ = true; #================这个要完成什么工作,在哪里使用?
+    } 
   }
   // The default value of sync_on_finish will be flipped soon and this
   // environment variable will be removed as well.
